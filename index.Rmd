@@ -1,0 +1,166 @@
+---
+output: 
+  html_document: 
+    keep_md: yes
+---
+## Predicting the quality of execution of weight lifting exercises
+
+### Overview
+
+The objective of this project is to predict how well weight lifting exercises were performed according to the variables provided in the Weight Lifting Exercise Dataset [1]. This dataset contains a training set and a testing set. We will use cross-validation to build prediction models int the training set.
+
+The project will be developed under the following R version, platform and packages versions:
+
+        R version 4.0.2 (2020-06-22) -- "Taking Off Again"
+        Platform: x86_64-w64-mingw32/x64 (64-bit)
+        Caret package version: 6.0.86
+        Rattle package version: 5.4.0
+
+*[1] Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.*
+
+### Loading packages
+
+```{r, warning=FALSE, message=FALSE}
+library(caret); library(rattle)
+```
+
+### Downloading and cleaning
+
+```{r, cache=TRUE}
+csv_training_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+csv_test_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(csv_training_url, destfile = "./training.csv")
+download.file(csv_test_url, destfile = "./test.csv")
+training <- read.csv("./training.csv")
+test <- read.csv("./test.csv")
+dim(training);dim(test)
+```
+
+We see that there are 160 potential variables to use for prediction. However, we can identify 3 types of variables that we want to not take into account when building the prediction models:
+
+- Variables that reference the subjects and detail when the information was collected.
+- Variables that have near zero variation.
+- Variables that contains NAs. We will not use imputting techniques for this cases in this project.
+
+```{r}
+str(training, list.len=20)
+```
+
+```{r, cache=TRUE}
+ref <- 1:7
+nzv <- nearZeroVar(training, saveMetrics = TRUE)
+nzvTrue <- which(nzv$nzv=="TRUE")        
+nas <- which(colSums(is.na(training))>0)
+deletedVariables <- unique(c(ref,nzvTrue,nas))
+trainingClean <- training[,-deletedVariables]
+testClean <- test[,-deletedVariables]
+dim(trainingClean);dim(testClean)
+```
+
+We will use 53 of the 160 variables available to build our prediction models.
+
+### Creating validation set
+
+Now that we have our training and testing sets cleaned we will split the training set in two new sets: one for building the models and another one to validate them. Test set will be reserved to use only once when the final model is selected.
+
+```{r, cache=TRUE}
+set.seed(1234)
+inBuild <- createDataPartition(y=trainingClean$classe, p=0.7,list=FALSE)
+building <- trainingClean[inBuild,]
+validation <- trainingClean[-inBuild,]
+dim(building);dim(validation)
+```
+
+### Exploratory data analysis
+
+```{r}
+table(building$classe)/(length(building$classe))*100
+```
+
+All performance types of classes have similar proportions except for class A that has some more observations.
+
+```{r, fig.width=12, fig.height=8}
+plot(building[,1], col = factor(building$classe), ylab = names(building)[1])
+legend("right",legend=unique(factor(building$classe)),
+       col=1:5, pch = 19)
+```
+
+Taking the first variable of the building set, we see in the plot above that the variability is not enough to distinguish clearly the classes. We could continue with techniques like clustering and SVD to see if we can identify how to classify the classes of performance. Since this is not the scope of the project we will pass directly to constructing prediction models that will help us with this.
+
+### Prediction models
+
+**Classification Trees**
+
+The first model that we will try is classification trees.
+
+```{r, cache=TRUE}
+set.seed(1234)
+modFit1 <- train(classe~., method="rpart", data=building) 
+```
+```{r, cache=TRUE, fig.width=12, fig.height=8}
+fancyRpartPlot(modFit1$finalModel, sub="Classification Trees")
+```
+
+The model gives us some ideas of variables that would be useful to classify the type of performance but the final leaves are not as we would expected (class D is missing). We will test its accuracy in the validation set.
+
+```{r, cache=TRUE}
+pred1 <- predict(modFit1, newdata=validation)
+cm1 <- confusionMatrix(pred1, factor(validation$classe))
+cm1$overall[1]
+```
+
+The accuracy of this model is very low. We will try now a random forest model.
+
+**Random Forest**
+
+```{r, cache=TRUE}
+set.seed(1234)
+modFit2 <- train(classe~., method="rf", data=building, 
+                 trControl=trainControl(method="cv", number=3))
+modFit2
+pred2 <- predict(modFit2, newdata=validation)
+cm2 <- confusionMatrix(pred2, factor(validation$classe))
+cm2$overall[1]
+varImportance <- varImp(modFit2)
+varImportance
+```
+
+The random forest with 3 fold cross-validation presents a much more higher accuracy than the classiication trees. Although we could just accept this model and test it in the testing set we will try a boosting model.
+
+**Boosting**
+
+```{r, cache=TRUE}
+set.seed(1234)
+modFit3 <- train(classe~., method="gbm", data=building, 
+                 trControl=trainControl(method="cv", number=3), verbose=FALSE)
+modFit3
+pred3 <- predict(modFit3, newdata=validation)
+cm3 <- confusionMatrix(pred3, factor(validation$classe))
+cm3$overall[1]
+```
+
+The boosting with 3 fold cross-validation presents also a much more higher accuracy level than the classification trees but less than random forest.
+
+**Models comparison**
+
+```{r, cache=TRUE}
+data.frame(Model=c("Classification trees","Random forest", "Boosting"), Accuracy=c(cm1$overall[1],cm2$overall[1],cm3$overall[1]),
+OutSampleError=c((1-cm1$overall[1]),(1-cm2$overall[1]),(1-cm3$overall[1])))
+```
+
+From the table above we can identify that the random forest model has the higher level of accuracy. Although we can try stacking models, due to the level of accuracy that we obtained with the random forest model we will not try this. We select the random forest model to test it on the testing set.
+```{r, echo=FALSE}
+ose <- round((1-cm2$overall[1])*100, digits = 3)
+```
+Since the testing set does not provide the *classe* variable, we will estimate the out sample error as the one obtained in the validation set for the random forest model selected. The out sample error is: `r ose`%.
+
+### Results of the prediction on the testing set
+
+```{r, cache=TRUE}
+predTesting <- predict(modFit2, newdata=testClean)
+predTesting
+```
+
+### Conclusions
+
+We tried three different prediction models to predict how well weight lifting exercises were performed. Among those, the random forest model presented a low out sample error when tested in the validation set and hence we are confident that given a new set the model will accuratly predict the quality of execution of weight lifting exercises.
